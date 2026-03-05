@@ -28,7 +28,7 @@ class Game {
     setupPauseMenu() {
         // Setup pause button click handler
         this.pauseButton.addEventListener('click', () => {
-            if ([GAME_CONSTANTS.MODES.GAMEPLAY, GAME_CONSTANTS.MODES.BATTING, GAME_CONSTANTS.MODES.PITCHING].includes(this.gameState.mode)) {
+            if ([GAME_CONSTANTS.MODES.GAMEPLAY, GAME_CONSTANTS.MODES.BATTING, GAME_CONSTANTS.MODES.PITCHING, GAME_CONSTANTS.MODES.INTERACTIVE_BATTING].includes(this.gameState.mode)) {
                 this.showPauseMenu();
             }
         });
@@ -102,7 +102,12 @@ class Game {
         };
         
         window.togglePauseTTS = () => {
-            this.audioSystem.settings.ttsEnabled = !this.audioSystem.settings.ttsEnabled;
+            if (window.NarbeVoiceManager) {
+                window.NarbeVoiceManager.toggleTTS();
+                this.audioSystem.settings.ttsEnabled = window.NarbeVoiceManager.getSettings().ttsEnabled;
+            } else {
+                this.audioSystem.settings.ttsEnabled = !this.audioSystem.settings.ttsEnabled;
+            }
             this.audioSystem.save();
             this.updatePauseSettingsDisplay();
             if (this.audioSystem.settings.ttsEnabled) {
@@ -165,11 +170,24 @@ class Game {
         this.gameState.previousMode = this.gameState.mode;
         this.gameState.mode = GAME_CONSTANTS.MODES.PAUSE_MENU;
         
+        // Clear the return/enter held state to prevent any lingering hold checks
+        this.gameState.returnHeld = false;
+        this.gameState.returnHoldStart = 0;
+        
+        // Unblock ALL inputs so pause menu can be interacted with
+        this.gameState.inputsBlocked = false;
+        this.gameState.playInProgress = false;
+        
         // Set up scanning for pause menu buttons - start with first option
         this.gameState.menuOptions = ['Resume Game', 'Settings', 'Restart Game', 'Main Menu'];
         this.gameState.selectedIndex = 0;
         this.gameState.menuReady = true;
         this.gameState.hasScanned = false;
+        
+        // Ensure the main pause menu is visible (not settings or confirmation)
+        document.getElementById('pauseMenu').style.display = 'block';
+        document.getElementById('pauseSettingsMenu').style.display = 'none';
+        document.getElementById('resetSeasonConfirmation').style.display = 'none';
         
         // Show the HTML pause overlay
         this.pauseOverlay.classList.add('active');
@@ -228,14 +246,21 @@ class Game {
         // Return to the previous game mode
         this.gameState.mode = this.gameState.previousMode || GAME_CONSTANTS.MODES.GAMEPLAY;
         
+        // Clear any lingering return/enter hold state to prevent pause re-triggering
+        this.gameState.returnHeld = false;
+        this.gameState.returnHoldStart = 0;
+        
         this.audioSystem.speak('Resuming game');
         
         if (this.gameState.mode === GAME_CONSTANTS.MODES.BATTING) {
-            // Reset batting menu state and call showSwingMenu to restore proper options
-            this.gameLogic.showSwingMenu();
+            // Reset batting menu state and call showStealMenu to restore proper options
+            this.gameLogic.showStealMenu();
         } else if (this.gameState.mode === GAME_CONSTANTS.MODES.PITCHING) {
             // Reset pitching menu state and call showPitchMenu to restore proper options
             this.gameLogic.showPitchMenu();
+        } else if (this.gameState.mode === GAME_CONSTANTS.MODES.INTERACTIVE_BATTING) {
+            // Resume interactive batting - restart the pitch
+            this.gameLogic.startInteractivePitch();
         } else {
             this.drawGameScreen();
         }
@@ -315,9 +340,14 @@ class Game {
                 this.drawGameScreen();
                 this.fieldRenderer.initializeFieldPlayers(this.gameState);
             } else if (mode === GAME_CONSTANTS.MODES.BATTING) {
-                this.menuSystem.drawSwingMenu();
+                this.menuSystem.drawStealMenu();
             } else if (mode === GAME_CONSTANTS.MODES.PITCHING) {
-                this.menuSystem.drawPitchMenu();
+                // Use drawPitchGridMenu which has null check - won't draw if grid is cleared
+                this.menuSystem.drawPitchGridMenu();
+            } else if (mode === GAME_CONSTANTS.MODES.INTERACTIVE_BATTING) {
+                // Interactive batting mode - redraw field and UI
+                this.drawGameScreen();
+                this.uiRenderer.drawInteractiveBattingUI(this.gameState);
             } else if (mode === GAME_CONSTANTS.MODES.HALF_INNING_TRANSITION) {
                 this.uiRenderer.drawTransitionScreen(this.gameState);
             }
@@ -362,14 +392,14 @@ class Game {
         // Update the button text to reflect current settings
         document.getElementById('pauseMusicToggle').textContent = `Music: ${this.audioSystem.settings.musicEnabled ? 'ON' : 'OFF'}`;
         document.getElementById('pauseSoundToggle').textContent = `Sound Effects: ${this.audioSystem.settings.soundEnabled ? 'ON' : 'OFF'}`;
-        document.getElementById('pauseTTSToggle').textContent = `Text-to-Speech: ${this.audioSystem.settings.ttsEnabled ? 'ON' : 'OFF'}`;
+        document.getElementById('pauseTTSToggle').textContent = `Text-to-Speech: ${window.NarbeVoiceManager ? (window.NarbeVoiceManager.getSettings().ttsEnabled ? 'ON' : 'OFF') : (this.audioSystem.settings.ttsEnabled ? 'ON' : 'OFF')}`;
         document.getElementById('pauseVoiceToggle').textContent = `Voice: ${voiceDisplayName}`;
         
         // Update menu options array to match
         this.gameState.menuOptions = [
             `Music: ${this.audioSystem.settings.musicEnabled ? 'ON' : 'OFF'}`,
             `Sound Effects: ${this.audioSystem.settings.soundEnabled ? 'ON' : 'OFF'}`,
-            `Text-to-Speech: ${this.audioSystem.settings.ttsEnabled ? 'ON' : 'OFF'}`,
+            `Text-to-Speech: ${window.NarbeVoiceManager ? (window.NarbeVoiceManager.getSettings().ttsEnabled ? 'ON' : 'OFF') : (this.audioSystem.settings.ttsEnabled ? 'ON' : 'OFF')}`,
             `Voice: ${voiceDisplayName}`,
             'Next Track',
             'Reset Season',
