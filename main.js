@@ -487,7 +487,7 @@ app.whenReady().then(async () => {
           "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com http://localhost:* http://127.0.0.1:*; " +
           "font-src 'self' data: https://fonts.gstatic.com; " +
           "worker-src 'self' blob:; " +
-          "media-src 'self' blob: https://*.googlevideo.com https://*.youtube.com http://localhost:* http://127.0.0.1:*; " +
+          "media-src 'self' data: blob: https://*.googlevideo.com https://*.youtube.com http://localhost:* http://127.0.0.1:*; " +
           "frame-src 'self' blob: https://www.youtube.com https://www.youtube-nocookie.com https://challenges.cloudflare.com http://localhost:* http://127.0.0.1:*;"
         ]
       }

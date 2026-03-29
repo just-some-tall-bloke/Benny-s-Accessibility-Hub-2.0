@@ -1539,6 +1539,8 @@ class DiscordBridge(QtCore.QObject):
                     typ = "image"
                 elif ctype.startswith("video/") or fn.lower().endswith((".mp4",".mov",".m4v",".webm",".avi",".mkv",".3gp",".mpg",".mpeg")):
                     typ = "video"
+                elif ctype.startswith("audio/") or fn.lower().endswith((".mp3",".wav",".ogg",".m4a",".aac",".flac",".wma",".opus",".aiff",".aif")):
+                    typ = "audio"
                 out.append({"type": typ, "url": url, "filename": fn})
         except Exception:
             pass
@@ -2181,6 +2183,11 @@ class BenDiscordUI(QtWidgets.QMainWindow):
         # stop any ongoing TTS before announcing the next focus
         self._tts_stop()
 
+        # If video selection overlay is open, Space cycles to next video
+        if hasattr(self, "_vid_select_overlay") and self._vid_select_overlay.isVisible():
+            self._video_selection_next()
+            return
+
         # If actions overlay is open, Space cycles current option (or selects first on first press)
         if hasattr(self, "_act_overlay") and self._act_overlay.isVisible():
             self._actions_focus_next(backward=False)
@@ -2343,6 +2350,11 @@ class BenDiscordUI(QtWidgets.QMainWindow):
         # NEW: Close video overlay
         if hasattr(self, "_vid_overlay") and self._vid_overlay.isVisible():
             self._close_video_overlay()
+            return
+        # NEW: Close video selection overlay
+        if hasattr(self, "_vid_select_overlay") and self._vid_select_overlay.isVisible():
+            self._close_video_selection_overlay()
+            self._speak("Closed video selection")
             return
         # Back out to block-level scan from inner scans
         if self.scan_mode == "channels":
@@ -2519,6 +2531,7 @@ class BenDiscordUI(QtWidgets.QMainWindow):
                 # Detect embedded media presence
                 has_img = any(a.get("type") == "image" for a in (ui.attachments or []))
                 has_vid = any(a.get("type") == "video" for a in (ui.attachments or []))
+                has_aud = any(a.get("type") == "audio" for a in (ui.attachments or []))
                 has_yt = bool(self._extract_youtube_url(ui.content))
                 
                 extra = ""
@@ -2528,6 +2541,8 @@ class BenDiscordUI(QtWidgets.QMainWindow):
                     extra = " with embedded media"
                 elif has_vid:
                     extra = " with embedded video"
+                elif has_aud:
+                    extra = " with voice recording"
                 elif has_img:
                     extra = " with embedded image"
                 self._speak(f"Message from {ui.author} at {self._fmt_12h(ui.ts)}{extra}")
@@ -2796,6 +2811,30 @@ class BenDiscordUI(QtWidgets.QMainWindow):
         if not self._web_view:
             self._vid_stack.addWidget(QtWidgets.QLabel("Web video playback not supported"))
 
+        # Video Selection Overlay (for multiple videos)
+        self._vid_select_overlay = QtWidgets.QFrame(self.view_msgs.viewport())
+        self._vid_select_overlay.setStyleSheet("background: rgba(0,0,0,0.95);")
+        self._vid_select_overlay.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        self._vid_select_overlay.hide()
+        
+        vid_sel_layout = QtWidgets.QVBoxLayout(self._vid_select_overlay)
+        vid_sel_layout.setContentsMargins(40, 40, 40, 40)
+        vid_sel_layout.setAlignment(Qt.AlignCenter)
+        
+        self._vid_select_label = QtWidgets.QLabel(self._vid_select_overlay)
+        self._vid_select_label.setAlignment(Qt.AlignCenter)
+        self._vid_select_label.setStyleSheet("color: white; font-size: 32px; font-weight: bold;")
+        vid_sel_layout.addWidget(self._vid_select_label)
+        
+        self._vid_select_hint = QtWidgets.QLabel("Space = Next Video | Enter = Play", self._vid_select_overlay)
+        self._vid_select_hint.setAlignment(Qt.AlignCenter)
+        self._vid_select_hint.setStyleSheet("color: #aaaaaa; font-size: 18px; margin-top: 20px;")
+        vid_sel_layout.addWidget(self._vid_select_hint)
+        
+        # Video slideshow state
+        self._video_list: List[dict] = []  # List of video attachments
+        self._video_index: int = 0  # Current video index
+
     def _center_overlay(self, overlay: QtWidgets.QWidget):
         """
         Center the overlay horizontally and place it in the lower-middle of the viewport.
@@ -3018,6 +3057,7 @@ class BenDiscordUI(QtWidgets.QMainWindow):
         from_me = False
         has_image = False
         has_video = False
+        has_audio = False
         try:
             mid = self._act_for_msg_id
             ui = next((m for m in self.bridge.ui_messages.get(self.current_thread_id, []) if m.id == mid), None)
@@ -3026,6 +3066,7 @@ class BenDiscordUI(QtWidgets.QMainWindow):
                 if ui.attachments:
                     has_image = any(a.get("type") == "image" for a in ui.attachments)
                     has_video = any(a.get("type") == "video" for a in ui.attachments)
+                    has_audio = any(a.get("type") == "audio" for a in ui.attachments)
                 # Check for YouTube link
                 if self._extract_youtube_url(ui.content):
                     has_video = True
@@ -3046,7 +3087,7 @@ class BenDiscordUI(QtWidgets.QMainWindow):
 
         # Build actions
         actions = ["Read"]
-        if has_image or has_video:
+        if has_image or has_video or has_audio:
             actions.append("View")
         if not from_me:
             actions += ["Reply", "React"]
@@ -3212,8 +3253,9 @@ class BenDiscordUI(QtWidgets.QMainWindow):
                 self._speak("Message not found")
                 return
 
-            # Check for video attachment first
-            vid_att = next((a for a in (ui.attachments or []) if a.get("type") == "video"), None)
+            # Collect ALL video and audio attachments
+            video_attachments = [a for a in (ui.attachments or []) if a.get("type") == "video"]
+            audio_attachments = [a for a in (ui.attachments or []) if a.get("type") == "audio"]
             yt_url = self._extract_youtube_url(ui.content)
             
             # 1. YouTube Link -> Play EXTERNAL (Chrome)
@@ -3222,22 +3264,51 @@ class BenDiscordUI(QtWidgets.QMainWindow):
                 self._launch_chrome_with_control_bar(yt_url, "Opening video")
                 return
 
-            # 2. Native Video Attachment (MP4, etc.) -> Download & Play EXTERNAL (Chrome)
-            # QtWebEngine lacks proprietary codecs (H.264/AAC), so we must use Chrome.
-            # Direct URL navigation in Chrome might fail if headers are needed, so we download first.
-            if vid_att:
-                url = vid_att.get("url")
-                if not url:
-                    self._speak("Invalid video URL")
-                    return
+            # 2. Video Attachments -> Download all and create playlist
+            if video_attachments:
+                self._media_list = video_attachments
+                self._media_type = "video"
+                self._downloaded_media_paths = []
+                self._media_to_download = len(video_attachments)
+                self._media_downloaded = 0
                 
-                self._speak("Downloading video")
-                req = QtNetwork.QNetworkRequest(QtCore.QUrl(url))
-                reply = self.nam.get(req)
-                reply.finished.connect(lambda: self._on_video_downloaded(reply, url))
+                if len(video_attachments) > 1:
+                    self._speak(f"Downloading {len(video_attachments)} videos")
+                else:
+                    self._speak("Downloading video")
+                
+                # Start downloading all videos
+                for i, vid_att in enumerate(video_attachments):
+                    url = vid_att.get("url")
+                    if url:
+                        req = QtNetwork.QNetworkRequest(QtCore.QUrl(url))
+                        reply = self.nam.get(req)
+                        reply.finished.connect(lambda r=reply, u=url, idx=i: self._on_playlist_media_downloaded(r, u, idx))
                 return
 
-            # 3. Image Attachment -> View INSIDE app
+            # 3. Audio Attachments -> Download all and create playlist
+            if audio_attachments:
+                self._media_list = audio_attachments
+                self._media_type = "audio"
+                self._downloaded_media_paths = []
+                self._media_to_download = len(audio_attachments)
+                self._media_downloaded = 0
+                
+                if len(audio_attachments) > 1:
+                    self._speak(f"Downloading {len(audio_attachments)} audio files")
+                else:
+                    self._speak("Downloading audio")
+                
+                # Start downloading all audio files
+                for i, aud_att in enumerate(audio_attachments):
+                    url = aud_att.get("url")
+                    if url:
+                        req = QtNetwork.QNetworkRequest(QtCore.QUrl(url))
+                        reply = self.nam.get(req)
+                        reply.finished.connect(lambda r=reply, u=url, idx=i: self._on_playlist_media_downloaded(r, u, idx))
+                return
+
+            # 4. Image Attachment -> View INSIDE app
             img_att = next((a for a in (ui.attachments or []) if a.get("type") == "image"), None)
             if img_att:
                 url = img_att.get("url")
@@ -3267,11 +3338,7 @@ class BenDiscordUI(QtWidgets.QMainWindow):
             if reply.error() == QtNetwork.QNetworkReply.NoError:
                 data = reply.readAll()
                 # Determine extension
-                ext = ".mp4"
-                if ".mov" in original_url.lower(): ext = ".mov"
-                elif ".mp3" in original_url.lower(): ext = ".mp3"
-                elif ".webm" in original_url.lower(): ext = ".webm"
-                elif ".mkv" in original_url.lower(): ext = ".mkv"
+                ext = self._get_media_extension(original_url)
                 
                 # Save to temp file
                 fd, path = tempfile.mkstemp(suffix=ext)
@@ -3280,13 +3347,240 @@ class BenDiscordUI(QtWidgets.QMainWindow):
                 
                 # Launch Chrome with file URL
                 file_url = QtCore.QUrl.fromLocalFile(path).toString()
-                self._launch_chrome_with_control_bar(file_url, "Opening video")
+                self._launch_chrome_with_control_bar(file_url, "Opening media")
             else:
                 self._speak("Download failed")
             reply.deleteLater()
         except Exception:
             traceback.print_exc()
-            self._speak("Error playing video")
+            self._speak("Error playing media")
+
+    def _get_media_extension(self, url: str) -> str:
+        """Determine file extension from URL"""
+        url_lower = url.lower()
+        # Video extensions
+        if ".mov" in url_lower: return ".mov"
+        elif ".webm" in url_lower: return ".webm"
+        elif ".mkv" in url_lower: return ".mkv"
+        elif ".avi" in url_lower: return ".avi"
+        elif ".m4v" in url_lower: return ".m4v"
+        elif ".3gp" in url_lower: return ".3gp"
+        elif ".mpg" in url_lower or ".mpeg" in url_lower: return ".mpg"
+        # Audio extensions
+        elif ".mp3" in url_lower: return ".mp3"
+        elif ".wav" in url_lower: return ".wav"
+        elif ".ogg" in url_lower: return ".ogg"
+        elif ".m4a" in url_lower: return ".m4a"
+        elif ".aac" in url_lower: return ".aac"
+        elif ".flac" in url_lower: return ".flac"
+        elif ".wma" in url_lower: return ".wma"
+        elif ".opus" in url_lower: return ".opus"
+        elif ".aiff" in url_lower or ".aif" in url_lower: return ".aiff"
+        # Default
+        elif ".mp4" in url_lower: return ".mp4"
+        return ".mp4"
+
+    def _on_playlist_media_downloaded(self, reply, original_url, index):
+        """Handle download of a video or audio file in a playlist"""
+        try:
+            path = None
+            if reply.error() == QtNetwork.QNetworkReply.NoError:
+                data = reply.readAll()
+                # Determine extension
+                ext = self._get_media_extension(original_url)
+                
+                # Save to temp file
+                fd, path = tempfile.mkstemp(suffix=ext)
+                with os.fdopen(fd, 'wb') as f:
+                    f.write(data.data())
+            
+            reply.deleteLater()
+            
+            # Store downloaded path (or None if failed)
+            if not hasattr(self, "_downloaded_media_paths"):
+                self._downloaded_media_paths = []
+            # Ensure list is big enough
+            while len(self._downloaded_media_paths) <= index:
+                self._downloaded_media_paths.append(None)
+            self._downloaded_media_paths[index] = path
+            
+            # Track completion
+            self._media_downloaded = getattr(self, "_media_downloaded", 0) + 1
+            
+            # Check if all downloads complete
+            if self._media_downloaded >= self._media_to_download:
+                self._launch_media_playlist()
+                
+        except Exception:
+            traceback.print_exc()
+            self._media_downloaded = getattr(self, "_media_downloaded", 0) + 1
+            if self._media_downloaded >= self._media_to_download:
+                self._launch_media_playlist()
+
+    def _launch_media_playlist(self):
+        """Create and launch an HTML media playlist that auto-plays and loops (works for video and audio)"""
+        try:
+            # Filter out failed downloads
+            valid_paths = [p for p in self._downloaded_media_paths if p]
+            media_type = getattr(self, "_media_type", "video")
+            
+            if not valid_paths:
+                self._speak(f"No {media_type} files downloaded successfully")
+                return
+            
+            if len(valid_paths) == 1:
+                # Single file - just play it directly
+                file_url = QtCore.QUrl.fromLocalFile(valid_paths[0]).toString()
+                self._launch_chrome_with_control_bar(file_url, f"Opening {media_type}")
+                return
+            
+            # Create HTML playlist page
+            media_urls = [QtCore.QUrl.fromLocalFile(p).toString() for p in valid_paths]
+            
+            # Determine the HTML element and MIME type based on media type
+            if media_type == "audio":
+                element_tag = "audio"
+                mime_type = "audio/mpeg"
+                title = "Audio Playlist"
+                item_label = "Audio"
+            else:
+                element_tag = "video"
+                mime_type = "video/mp4"
+                title = "Video Playlist"
+                item_label = "Video"
+            
+            html_content = f'''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>{title}</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ 
+            background: #000; 
+            display: flex; 
+            flex-direction: column;
+            align-items: center; 
+            justify-content: center; 
+            min-height: 100vh;
+            font-family: Arial, sans-serif;
+        }}
+        #mediaContainer {{
+            position: relative;
+            width: 100%;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+        video, audio {{
+            max-width: 100%;
+            max-height: 100%;
+            width: auto;
+            height: auto;
+        }}
+        audio {{
+            width: 80%;
+            max-width: 600px;
+        }}
+        #overlay {{
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.7);
+            color: white;
+            padding: 10px 25px;
+            border-radius: 25px;
+            font-size: 18px;
+            font-weight: bold;
+            z-index: 1000;
+            opacity: 1;
+            transition: opacity 0.5s;
+        }}
+        #overlay.hidden {{ opacity: 0; pointer-events: none; }}
+    </style>
+</head>
+<body>
+    <div id="overlay">{item_label} 1 of {len(media_urls)}</div>
+    <div id="mediaContainer">
+        <{element_tag} id="player" autoplay controls>
+            <source src="{media_urls[0]}" type="{mime_type}">
+        </{element_tag}>
+    </div>
+    <script>
+        const mediaFiles = {json.dumps(media_urls)};
+        const itemLabel = "{item_label}";
+        let currentIndex = 0;
+        const player = document.getElementById('player');
+        const overlay = document.getElementById('overlay');
+        let hideTimeout;
+        
+        function updateOverlay() {{
+            overlay.textContent = `${{itemLabel}} ${{currentIndex + 1}} of ${{mediaFiles.length}}`;
+            overlay.classList.remove('hidden');
+            clearTimeout(hideTimeout);
+            hideTimeout = setTimeout(() => overlay.classList.add('hidden'), 3000);
+        }}
+        
+        function playMedia(index) {{
+            currentIndex = index;
+            player.src = mediaFiles[currentIndex];
+            player.load();
+            player.play();
+            updateOverlay();
+        }}
+        
+        function nextMedia() {{
+            currentIndex = (currentIndex + 1) % mediaFiles.length;
+            playMedia(currentIndex);
+        }}
+        
+        function prevMedia() {{
+            currentIndex = (currentIndex - 1 + mediaFiles.length) % mediaFiles.length;
+            playMedia(currentIndex);
+        }}
+        
+        // Auto-advance when media ends
+        player.addEventListener('ended', nextMedia);
+        
+        // Keyboard controls
+        document.addEventListener('keydown', (e) => {{
+            if (e.key === 'ArrowRight' || e.key === 'n' || e.key === 'N') {{
+                nextMedia();
+            }} else if (e.key === 'ArrowLeft' || e.key === 'p' || e.key === 'P') {{
+                prevMedia();
+            }} else if (e.key === ' ') {{
+                if (player.paused) player.play();
+                else player.pause();
+            }}
+        }});
+        
+        // Media key support (Next Track / Previous Track)
+        if ('mediaSession' in navigator) {{
+            navigator.mediaSession.setActionHandler('nexttrack', nextMedia);
+            navigator.mediaSession.setActionHandler('previoustrack', prevMedia);
+        }}
+        
+        // Show overlay initially
+        updateOverlay();
+    </script>
+</body>
+</html>'''
+            
+            # Save HTML to temp file
+            fd, html_path = tempfile.mkstemp(suffix=".html")
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            
+            # Launch in Chrome
+            file_url = QtCore.QUrl.fromLocalFile(html_path).toString()
+            self._speak(f"Playing {len(valid_paths)} {media_type} files")
+            self._launch_chrome_with_control_bar(file_url, "Opening playlist")
+            
+        except Exception:
+            traceback.print_exc()
+            self._speak("Error creating playlist")
 
     def _on_image_downloaded(self, reply):
         try:
@@ -3320,6 +3614,61 @@ class BenDiscordUI(QtWidgets.QMainWindow):
                 self._media_player.stop()
             if self._web_view:
                 self._web_view.setUrl(QtCore.QUrl("about:blank"))
+
+    def _show_video_selection_overlay(self):
+        """Show the video selection overlay for multiple videos"""
+        if not self._video_list:
+            return
+        
+        # Update label
+        total = len(self._video_list)
+        current = self._video_index + 1
+        self._vid_select_label.setText(f"Video {current} of {total}")
+        
+        # Position and show overlay
+        self._vid_select_overlay.setGeometry(self.view_msgs.viewport().rect())
+        self._vid_select_overlay.show()
+        self._vid_select_overlay.raise_()
+        
+        self._speak(f"Video {current} of {total}. Space for next, Enter to play")
+
+    def _close_video_selection_overlay(self):
+        """Close the video selection overlay"""
+        if hasattr(self, "_vid_select_overlay"):
+            self._vid_select_overlay.hide()
+        self._video_list = []
+        self._video_index = 0
+
+    def _video_selection_next(self):
+        """Move to next video in selection"""
+        if not self._video_list:
+            return
+        self._video_index = (self._video_index + 1) % len(self._video_list)
+        total = len(self._video_list)
+        current = self._video_index + 1
+        self._vid_select_label.setText(f"Video {current} of {total}")
+        self._speak(f"Video {current} of {total}")
+
+    def _video_selection_play(self):
+        """Play the currently selected video"""
+        if not self._video_list or self._video_index >= len(self._video_list):
+            self._speak("No video selected")
+            return
+        
+        vid_att = self._video_list[self._video_index]
+        url = vid_att.get("url")
+        if not url:
+            self._speak("Invalid video URL")
+            return
+        
+        # Close selection overlay
+        self._close_video_selection_overlay()
+        
+        # Download and play video
+        self._speak("Downloading video")
+        req = QtNetwork.QNetworkRequest(QtCore.QUrl(url))
+        reply = self.nam.get(req)
+        reply.finished.connect(lambda: self._on_video_downloaded(reply, url))
 
     def eventFilter(self, obj, ev):
         try:
@@ -3362,6 +3711,16 @@ class BenDiscordUI(QtWidgets.QMainWindow):
                     if hasattr(self, "_vid_overlay") and self._vid_overlay.isVisible():
                         self._close_video_overlay()
                         self._speak("Closed video")
+                        # Reset cooldown and mark as handled
+                        self.enter_down = True
+                        self.enter_at = time.time()
+                        self._enter_hold_fired = True
+                        self._enter_cooldown_until = now_ms + self._input_cooldown_ms
+                        return True
+
+                    # NEW: Play video from selection overlay if open
+                    if hasattr(self, "_vid_select_overlay") and self._vid_select_overlay.isVisible():
+                        self._video_selection_play()
                         # Reset cooldown and mark as handled
                         self.enter_down = True
                         self.enter_at = time.time()
@@ -3569,7 +3928,34 @@ class BenDiscordUI(QtWidgets.QMainWindow):
             if not ui:
                 return
             body = self._sanitize_tts(ui.content or "")
-            self._speak(body if body else "No text")
+            
+            # If no text, describe attachments
+            if not body:
+                attachments = ui.attachments or []
+                audio_count = sum(1 for a in attachments if a.get("type") == "audio")
+                video_count = sum(1 for a in attachments if a.get("type") == "video")
+                image_count = sum(1 for a in attachments if a.get("type") == "image")
+                
+                parts = []
+                if audio_count == 1:
+                    parts.append("Voice message")
+                elif audio_count > 1:
+                    parts.append(f"{audio_count} audio files")
+                if video_count == 1:
+                    parts.append("Video")
+                elif video_count > 1:
+                    parts.append(f"{video_count} videos")
+                if image_count == 1:
+                    parts.append("Image")
+                elif image_count > 1:
+                    parts.append(f"{image_count} images")
+                
+                if parts:
+                    body = " and ".join(parts)
+                else:
+                    body = "No text"
+            
+            self._speak(body)
             self._mark_read(ui.id)
         except Exception:
             pass
@@ -3684,6 +4070,13 @@ class BenDiscordUI(QtWidgets.QMainWindow):
                             "&nbsp;<span style='display:inline-block; vertical-align:middle; margin-left:8px; padding:4px 16px; "
                             "background:#202225; border-radius:10px; border:2px solid #FFD64D; color:#FFD64D; "
                             "font-size:32px; font-weight:bold;'>🎥 VIDEO</span>"
+                        )
+                    elif att.get("type") == "audio":
+                        # Placeholder for audio/voice message (inline)
+                        attachments_html += (
+                            "&nbsp;<span style='display:inline-block; vertical-align:middle; margin-left:8px; padding:4px 16px; "
+                            "background:#202225; border-radius:10px; border:2px solid #57F287; color:#57F287; "
+                            "font-size:32px; font-weight:bold;'>🎤 VOICE</span>"
                         )
 
             esc_author = (ui.author or "").replace("<","&lt;").replace(">","&gt;")

@@ -48,6 +48,14 @@
       "path": "apps/tools/journal/index.html",
       "image": "images/tools/journal.png",
       "genres": ["Communication", "Writing"]
+    },
+    {
+      "id": "dayhub",
+      "title": "Day Hub",
+      "description": "Date, time, weather, and spoken news (local / NPR / BBC). Settings (click) for location.",
+      "path": "apps/tools/dayhub/index.html",
+      "image": "images/tools/dayhub.png",
+      "genres": ["Productivity", "Daily"]
     }
   ]
 }

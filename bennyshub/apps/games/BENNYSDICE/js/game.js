@@ -1803,7 +1803,9 @@ const yarkleState = {
     hasRolled: false,
     targetScore: 10000,
     currentPlayer: 0, // 0-indexed current player
-    scores: [0, 0, 0, 0] // Multiplayer scores
+    scores: [0, 0, 0, 0], // Multiplayer scores
+    isBanking: false, // Lock to prevent multiple bank operations
+    turnId: 0 // Unique turn ID to prevent cross-turn banking
 };
 window.yarkleState = yarkleState; // Expose for getFocusables
 
@@ -2001,6 +2003,10 @@ function updateYarklePreview(shouldSpeak = true) {
 }
 
 function yarkleRoll() {
+    // Prevent rolling during banking or when it's not player's turn
+    if (yarkleState.isBanking) return;
+    if (appState.players === 1 && !yarkleState.isPlayerTurn) return;
+    
     const msg = document.getElementById('yarkle-message');
 
     // Lock held dice and add their score
@@ -2195,12 +2201,28 @@ function highlightScoringYarkleDice() {
 }
 
 function yarkleBank() {
+    // Comprehensive guards to prevent multi-banking and cross-turn exploits
     if (!yarkleState.hasRolled) return;
+    if (yarkleState.isBanking) return; // Already banking - prevent spam
+    if (yarkleState.turnScore === 0 && yarkleState.dice.every(d => d === 0)) return; // No points to bank
+    
+    // In single player mode, verify it's actually player's turn
+    if (appState.players === 1 && !yarkleState.isPlayerTurn) return;
+    
+    // Lock banking immediately to prevent double-banking
+    yarkleState.isBanking = true;
+    const bankingTurnId = yarkleState.turnId; // Capture current turn ID
 
     // Add any currently held dice
     const heldValues = yarkleState.dice.filter((v, i) => yarkleState.held[i] && !yarkleState.locked[i]);
     const result = calculateYarkleScore(heldValues);
     yarkleState.turnScore += result.score;
+    
+    // Double-check turn didn't change during calculation
+    if (bankingTurnId !== yarkleState.turnId) {
+        yarkleState.isBanking = false;
+        return;
+    }
 
     // Update score for current player
     if (appState.players === 1) {
@@ -2243,6 +2265,8 @@ function yarkleEndTurn(wasYarkle) {
     yarkleState.turnScore = 0;
     yarkleState.rollCount = 0;
     yarkleState.hasRolled = false;
+    yarkleState.isBanking = false; // Reset banking lock
+    yarkleState.turnId++; // Increment turn ID to invalidate any pending bank operations
 
     if (appState.players === 1) {
         // Single Player (Player vs CPU) Logic
@@ -2399,6 +2423,8 @@ function initYarkle() {
 
     yarkleState.rollCount = 0;
     yarkleState.hasRolled = false;
+    yarkleState.isBanking = false; // Reset banking lock
+    yarkleState.turnId = 0; // Reset turn ID
 
     // --- RANDOM START (NO INITIATIVE ROLL) ---
     const isSinglePlayer = (appState.players === 1);
@@ -2483,7 +2509,9 @@ const fahtzeeState = {
         smallStraight: null, largeStraight: null, fahtzee: null, chance: null
     },
     fahtzeeBonus: 0,
-    aiFahtzeeBonus: 0
+    aiFahtzeeBonus: 0,
+    isScoring: false, // Lock to prevent multiple score operations
+    hasRolledThisTurn: false // Track if player has rolled this turn
 };
 window.fahtzeeState = fahtzeeState; // Expose for getFocusables
 
@@ -2649,6 +2677,7 @@ function fahtzeeRoll() {
     // Roll 3D dice
     throw3DDice(5, heldData, (results) => {
         appState.isRolling = false;
+        fahtzeeState.hasRolledThisTurn = true; // Mark that player has rolled
         for (let i = 0; i < 5; i++) {
             // Update only if NOT in heldData (meaning it rolled)
             // heldData contains indices that were KEPT.
@@ -2954,7 +2983,16 @@ function showFahtzeeScorecard() {
 }
 
 function selectFahtzeeCategory(key) {
-    if (fahtzeeState.scorecard[key] !== null) return;
+    // Comprehensive guards to prevent multi-scoring
+    if (fahtzeeState.scorecard[key] !== null) return; // Already scored
+    if (fahtzeeState.isScoring) return; // Already scoring - prevent spam
+    if (!fahtzeeState.hasRolledThisTurn) return; // Must roll first
+    
+    // In single player mode, verify it's actually player's turn
+    if (appState.players === 1 && !fahtzeeState.isPlayerTurn) return;
+    
+    // Lock scoring immediately to prevent double-scoring
+    fahtzeeState.isScoring = true;
 
     const cat = FAHTZEE_CATEGORIES[key];
     const score = cat.calc(fahtzeeState.dice);
@@ -3026,6 +3064,8 @@ function selectFahtzeeCategory(key) {
             fahtzeeState.dice = [0, 0, 0, 0, 0];
             fahtzeeState.held = [false, false, false, false, false];
             fahtzeeState.rollsLeft = 3;
+            fahtzeeState.isScoring = false; // Reset scoring lock
+            fahtzeeState.hasRolledThisTurn = false; // Reset roll flag
 
             // Check if Game Over? (Everyone full?)
             // Just check current player's card for nulls
@@ -3098,6 +3138,8 @@ function selectFahtzeeCategory(key) {
 
         // After player scores, CPU takes turn
         fahtzeeState.isPlayerTurn = false;
+        fahtzeeState.isScoring = false; // Reset scoring lock
+        fahtzeeState.hasRolledThisTurn = false; // Reset roll flag
         resetTableColor();
         renderFahtzeeDice();
         document.getElementById('fahtzee-message').textContent = "CPU's turn...";
@@ -3298,6 +3340,8 @@ function aiSelectCategory() {
             fahtzeeState.held = [false, false, false, false, false];
             fahtzeeState.rollsLeft = 3;
             fahtzeeState.isPlayerTurn = true;
+            fahtzeeState.isScoring = false; // Reset scoring lock
+            fahtzeeState.hasRolledThisTurn = false; // Reset roll flag
             renderFahtzeeDice();
             msg.textContent = `Round ${fahtzeeState.round} - Your turn! Click ROLL`;
             speak(`Round ${fahtzeeState.round}. Your turn! You have ${fahtzeeState.totalScore} points.`);
@@ -3312,6 +3356,8 @@ function initFahtzee() {
     fahtzeeState.rollsLeft = 3;
     fahtzeeState.round = 1;
     fahtzeeState.currentPlayer = 0; // Initialize before initiative roll
+    fahtzeeState.isScoring = false; // Reset scoring lock
+    fahtzeeState.hasRolledThisTurn = false; // Reset roll flag
 
     // Multiplayer Setup
     // We need separate scorecards and bonus flags for each player
@@ -3431,20 +3477,30 @@ function savePlayerScorecard(playerIdx) {
 // GLOBAL EXPORTS FOR HTML HANDLERS
 // ============================================
 window.playerYarkleRoll = () => {
-    if (typeof yarkleState !== 'undefined' && !yarkleState.isPlayerTurn) return; 
+    if (typeof yarkleState === 'undefined') return;
+    if (!yarkleState.isPlayerTurn) return; // Not player's turn
+    if (yarkleState.isBanking) return; // Prevent roll during banking
     yarkleRoll();
 };
 window.playerYarkleBank = () => {
-    if (typeof yarkleState !== 'undefined' && !yarkleState.isPlayerTurn) return;
+    if (typeof yarkleState === 'undefined') return;
+    if (!yarkleState.isPlayerTurn) return; // Not player's turn
+    if (yarkleState.isBanking) return; // Already banking - prevent spam
+    if (!yarkleState.hasRolled) return; // Must roll first
     yarkleBank();
 };
 window.playerFahtzeeRoll = () => {
-    if (typeof fahtzeeState !== 'undefined' && !fahtzeeState.isPlayerTurn) return;
+    if (typeof fahtzeeState === 'undefined') return;
+    if (!fahtzeeState.isPlayerTurn) return; // Not player's turn
+    if (fahtzeeState.isScoring) return; // Prevent roll during scoring
     fahtzeeRoll();
 };
 window.playerFahtzeeScore = () => {
      // AUTO-SCORE LOGIC REPLACEMENT
-     if (typeof fahtzeeState !== 'undefined' && !fahtzeeState.isPlayerTurn) return;
+     if (typeof fahtzeeState === 'undefined') return;
+     if (!fahtzeeState.isPlayerTurn) return; // Not player's turn
+     if (fahtzeeState.isScoring) return; // Already scoring - prevent spam
+     if (!fahtzeeState.hasRolledThisTurn) return; // Must roll first
 
      // Reuse AI Logic to find best score
      const priorityOrder = [
