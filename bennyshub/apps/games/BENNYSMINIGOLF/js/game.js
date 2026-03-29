@@ -768,8 +768,8 @@ class Game {
         const steps = 5;
         const subDt = (dt * 60) / steps;
         
-        // Collect all balls that have started the hole
-        const activePlayers = this.players.filter(p => p.hasStartedHole);
+        // Collect all balls that have started the hole and haven't finished yet
+        const activePlayers = this.players.filter(p => p.hasStartedHole && !p.finishedHole);
         const balls = activePlayers.map(p => p.ball);
         
         // Store start positions for texture rolling
